@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Sarviq - 3D Kinetic Sculpture</title>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      scrollbar-width: none !important;
+      -ms-overflow-style: none !important;
+      background: transparent !important;
+      background-color: transparent !important;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    ::-webkit-scrollbar {
+      display: none !important;
+      width: 0px !important;
+      height: 0px !important;
+    }
+
+    .stage {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: transparent;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+      touch-action: none;
+      outline: none;
+    }
+  </style>
+
+  <!-- Local Three.js with CDN Fallback -->
+  <script src="js/three.js"></script>
+  <script>if (typeof THREE === 'undefined') { document.write('<scr' + 'ipt src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></scr' + 'ipt>'); }</script>
+</head>
+
+<body>
+  <div class="stage">
+    <canvas id="gl-canvas" aria-label="A kinetic hierarchy of nested scene nodes"></canvas>
+  </div>
+
+  <script>
+    (function () {
+      const DEG = Math.PI / 180;
+
+      // --- CONFIGURATION & EXACT CONSTANTS ---
+      const RING_SPECS = [
+        {
+          count: 20,
+          radius: 2.55,
+          tilt: [58 * DEG, 10 * DEG, 0],
+          scale: [0.54, 0.1, 0.13],
+          duration: 24, // seconds per full rotation
+          direction: 1,
+          color: new THREE.Color("#19daa3"), // Sarviq Brand Teal/Green (Ring 1)
+          glow: 1.35
+        },
+        {
+          count: 16,
+          radius: 1.85,
+          tilt: [-48 * DEG, 38 * DEG, 0],
+          scale: [0.44, 0.095, 0.11],
+          duration: 18, // seconds per full rotation
+          direction: -1,
+          color: new THREE.Color("#19daa3"), // Sarviq Brand Teal/Green (Ring 2)
+          glow: 1.35
+        },
+        {
+          count: 12,
+          radius: 1.18,
+          tilt: [24 * DEG, -58 * DEG, 0],
+          scale: [0.34, 0.085, 0.1],
+          duration: 13, // seconds per full rotation
+          direction: 1,
+          color: new THREE.Color("#19daa3"), // Sarviq Brand Teal/Green (Ring 3)
+          glow: 1.35
+        }
+      ];
+
+      const CORE_SPEC = {
+        scaleUncontracted: [0.34, 0.34, 0.34],
+        scaleContracted: [0.58, 0.58, 0.58],
+        color: new THREE.Color(1.0, 1.0, 1.0), // Pure White Cube
+        glow: 1.8
+      };
+
+      // --- SPRING VALUE SOLVER ---
+      class SpringValue {
+        constructor(initial = 0, { stiffness = 90, damping = 22, mass = 1 } = {}) {
+          this.current = initial;
+          this.target = initial;
+          this.velocity = 0;
+          this.stiffness = stiffness;
+          this.damping = damping;
+          this.mass = mass;
+        }
+
+        set(target) {
+          this.target = target;
+        }
+
+        snap(value) {
+          this.current = value;
+          this.target = value;
+          this.velocity = 0;
+        }
+
+        update(dt) {
+          const clampedDt = Math.min(dt, 0.064);
+          const force = -this.stiffness * (this.current - this.target);
+          const dampingForce = -this.damping * this.velocity;
+          const acceleration = (force + dampingForce) / this.mass;
+          this.velocity += acceleration * clampedDt;
+          this.current += this.velocity * clampedDt;
+          return this.current;
+        }
+      }
+
+      // --- CUSTOM OBJECT SHADER (KEY / FILL / RIM LIGHTING) ---
+      const CustomObjectShader = {
+        vertexShader: `
+          varying vec3 vNormal;
+          varying vec3 vWorldPosition;
+
+          void main() {
+            vNormal = (modelMatrix * vec4(normal, 0.0)).xyz;
+            vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+            vWorldPosition = worldPosition.xyz;
+            gl_Position = projectionMatrix * viewMatrix * worldPosition;
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 uColor;
+          uniform float uGlow;
+          uniform vec3 uCameraPos;
+
+          varying vec3 vNormal;
+          varying vec3 vWorldPosition;
+
+          void main() {
+            vec3 n = normalize(vNormal);
+            vec3 view = normalize(uCameraPos - vWorldPosition);
+
+            // Key directional light
+            float key = max(dot(n, normalize(vec3(-0.45, 0.8, 0.55))), 0.0);
+            // Fill light
+            float fill = max(dot(n, normalize(vec3(0.7, -0.2, 0.4))), 0.0);
+            // Rim Fresnel glow
+            float rim = pow(1.0 - max(dot(n, view), 0.0), 2.5);
+
+            float light = 0.16 + key * 1.2 + fill * 0.28 + rim * uGlow;
+            vec3 finalColor = uColor * light;
+
+            gl_FragColor = vec4(finalColor, 1.0);
+          }
+        `
+      };
+
+      // --- MAIN KINETIC SCULPTURE APP ---
+      class KineticSculpture {
+        constructor() {
+          this.canvas = document.getElementById('gl-canvas');
+          this.contracted = false;
+
+          // Pointer Tilt Springs
+          this.tiltX = new SpringValue(-8 * DEG, { stiffness: 90, damping: 22 });
+          this.tiltY = new SpringValue(10 * DEG, { stiffness: 90, damping: 22 });
+
+          this.entries = [];
+          this.rings = [];
+          this.clock = new THREE.Clock();
+
+          this.initScene();
+          this.buildHierarchy();
+          this.setupEvents();
+          this.animate();
+        }
+
+        initScene() {
+          this.scene = new THREE.Scene();
+
+          const width = this.canvas.clientWidth || window.innerWidth;
+          const height = this.canvas.clientHeight || window.innerHeight;
+
+          this.camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 100);
+          this.camera.position.set(0, 0.1, 8.5);
+          this.camera.lookAt(0, 0, 0);
+
+          try {
+            this.renderer = new THREE.WebGLRenderer({
+              canvas: this.canvas,
+              antialias: true,
+              alpha: true,
+              powerPreference: 'high-performance'
+            });
+            this.renderer.setSize(width, height);
+            this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+            this.renderer.setClearColor(0x000000, 0); // 100% transparent background
+          } catch (err) {
+            console.warn('WebGL initialization failed in kinetic-sculpture:', err);
+            this.renderer = null;
+            return;
+          }
+
+          this.root = new THREE.Group();
+          this.scene.add(this.root);
+        }
+
+        createShaderMaterial(color, glow = 1.25) {
+          return new THREE.ShaderMaterial({
+            vertexShader: CustomObjectShader.vertexShader,
+            fragmentShader: CustomObjectShader.fragmentShader,
+            uniforms: {
+              uColor: { value: color },
+              uGlow: { value: glow },
+              uCameraPos: { value: this.camera.position }
+            }
+          });
+        }
+
+        buildHierarchy() {
+          const moduleGeometry = new THREE.BoxGeometry(1, 1, 1);
+
+          this.entries = [];
+          this.rings = [];
+
+          RING_SPECS.forEach((spec, ringIndex) => {
+            const ringGroup = new THREE.Group();
+            ringGroup.rotation.set(...spec.tilt);
+
+            const mat = this.createShaderMaterial(spec.color, spec.glow);
+            const ringNodes = [];
+
+            for (let nodeIndex = 0; nodeIndex < spec.count; nodeIndex++) {
+              const angle = (nodeIndex / spec.count) * Math.PI * 2;
+              const posX = Math.cos(angle) * spec.radius;
+              const posY = Math.sin(angle) * spec.radius;
+              const posZ = 0;
+
+              const node = new THREE.Mesh(moduleGeometry, mat);
+              node.position.set(posX, posY, posZ);
+              node.rotation.set(0, 0, angle + Math.PI / 2);
+              node.scale.set(...spec.scale);
+
+              const entry = {
+                node,
+                ringIndex,
+                nodeIndex,
+                basePosition: [posX, posY, posZ],
+                baseRotationZ: angle + Math.PI / 2,
+                baseScale: [...spec.scale],
+                distSpring: new SpringValue(1.0, { stiffness: 120, damping: 14 }),
+                scaleSpring: new SpringValue(1.0, { stiffness: 120, damping: 14 }),
+                twistSpring: new SpringValue(0, { stiffness: 120, damping: 14 }),
+                zSpring: new SpringValue(0, { stiffness: 120, damping: 14 })
+              };
+
+              this.entries.push(entry);
+              ringNodes.push(node);
+              ringGroup.add(node);
+            }
+
+            this.rings.push({
+              group: ringGroup,
+              spec,
+              nodes: ringNodes
+            });
+
+            this.root.add(ringGroup);
+          });
+
+          // Center White Cube
+          const coreMat = this.createShaderMaterial(CORE_SPEC.color, CORE_SPEC.glow);
+          this.core = new THREE.Mesh(moduleGeometry, coreMat);
+          this.core.scale.set(...CORE_SPEC.scaleUncontracted);
+          this.core.rotation.set(20 * DEG, 35 * DEG, 10 * DEG);
+          this.root.add(this.core);
+
+          this.coreScaleSpring = new SpringValue(0.34, { stiffness: 130, damping: 15 });
+        }
+
+        setContracted(contracted) {
+          if (this.contracted === contracted) return;
+          this.contracted = contracted;
+
+          const totalEntries = this.entries.length;
+
+          this.entries.forEach((entry, index) => {
+            const delay = contracted ? index * 0.006 : (totalEntries - index) * 0.004;
+
+            setTimeout(() => {
+              const targetDist = contracted ? 0.43 : 1.0;
+              const targetScale = contracted ? 0.7 : 1.0;
+              const targetZ = contracted ? (entry.ringIndex - 1) * 0.2 : 0;
+              const targetTwist = contracted
+                ? (entry.nodeIndex % 2 ? -28 * DEG : 28 * DEG)
+                : 0;
+
+              if (contracted) {
+                entry.distSpring.stiffness = 140;
+                entry.distSpring.damping = 16;
+              } else {
+                entry.distSpring.stiffness = 100;
+                entry.distSpring.damping = 12;
+              }
+
+              entry.distSpring.set(targetDist);
+              entry.scaleSpring.set(targetScale);
+              entry.twistSpring.set(targetTwist);
+              entry.zSpring.set(targetZ);
+            }, delay * 1000);
+          });
+
+          this.coreScaleSpring.set(contracted ? 0.58 : 0.34);
+        }
+
+        setupEvents() {
+          const onResize = () => {
+            const width = this.canvas.clientWidth || window.innerWidth;
+            const height = this.canvas.clientHeight || window.innerHeight;
+            this.camera.aspect = width / height;
+            this.camera.updateProjectionMatrix();
+            this.renderer.setSize(width, height);
+          };
+
+          window.addEventListener('resize', onResize);
+
+          const onPointerMove = (e) => {
+            const rect = this.canvas.getBoundingClientRect();
+            const x = (e.clientX - rect.left) / rect.width;
+            const y = (e.clientY - rect.top) / rect.height;
+
+            this.tiltX.set((12 - y * 30) * DEG);
+            this.tiltY.set((-20 + x * 40) * DEG);
+          };
+
+          const onPointerLeave = () => {
+            this.tiltX.set(-8 * DEG);
+            this.tiltY.set(10 * DEG);
+          };
+
+          window.addEventListener('pointermove', onPointerMove);
+          document.addEventListener('pointerleave', onPointerLeave);
+
+          window.addEventListener('pointerdown', () => this.setContracted(true));
+          window.addEventListener('pointerup', () => this.setContracted(false));
+
+          window.addEventListener('keydown', (e) => {
+            if (e.code === 'Space') {
+              e.preventDefault();
+              this.setContracted(!this.contracted);
+            }
+          });
+        }
+
+        animate() {
+          if (!this.renderer) return;
+          requestAnimationFrame(() => this.animate());
+
+          const delta = this.clock.getDelta();
+          const elapsedTime = this.clock.getElapsedTime();
+
+          // 1. Root Tilt
+          this.root.rotation.x = this.tiltX.update(delta);
+          this.root.rotation.y = this.tiltY.update(delta);
+
+          // 2. Rotate Rings
+          this.rings.forEach((ring) => {
+            const spec = ring.spec;
+            const rotSpeed = ((Math.PI * 2) / spec.duration) * spec.direction;
+            ring.group.rotation.z += rotSpeed * delta;
+          });
+
+          // 3. Rotate Core Cube
+          const coreCycle = (elapsedTime / 16) * Math.PI * 2;
+          this.core.rotation.x = (20 * DEG) + coreCycle;
+          this.core.rotation.y = (35 * DEG) - coreCycle;
+
+          const currentCoreScale = this.coreScaleSpring.update(delta);
+          this.core.scale.set(currentCoreScale, currentCoreScale, currentCoreScale);
+
+          // 4. Update Node Positions & Twists
+          this.entries.forEach((entry) => {
+            const curDist = entry.distSpring.update(delta);
+            const curScale = entry.scaleSpring.update(delta);
+            const curTwist = entry.twistSpring.update(delta);
+            const curZ = entry.zSpring.update(delta);
+
+            entry.node.position.x = entry.basePosition[0] * curDist;
+            entry.node.position.y = entry.basePosition[1] * curDist;
+            entry.node.position.z = curZ;
+
+            entry.node.scale.x = entry.baseScale[0] * curScale;
+            entry.node.scale.y = entry.baseScale[1] * curScale;
+            entry.node.scale.z = entry.baseScale[2] * curScale;
+
+            entry.node.rotation.z = entry.baseRotationZ + curTwist;
+          });
+
+          // 5. Render Scene
+          this.renderer.render(this.scene, this.camera);
+        }
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => new KineticSculpture());
+      } else {
+        new KineticSculpture();
+      }
+    })();
+  </script>
+</body>
+
+</html>

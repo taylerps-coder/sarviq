@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Three.js Particle Morph Animation - Sarviq</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      scrollbar-width: none !important;
+      -ms-overflow-style: none !important;
+      background: transparent !important;
+      background-color: transparent !important;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    ::-webkit-scrollbar {
+      display: none !important;
+      width: 0px !important;
+      height: 0px !important;
+    }
+
+    .stage {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: grab;
+      touch-action: none;
+      outline: none;
+    }
+
+    canvas:active {
+      cursor: grabbing;
+    }
+  </style>
+
+  <!-- Local Three.js with CDN Fallback -->
+  <script src="js/three.js"></script>
+  <script>if (typeof THREE === 'undefined') { document.write('<scr' + 'ipt src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></scr' + 'ipt>'); }</script>
+  <!-- Contact Logo / Badge Base64 Data -->
+  <script src="js/contact-logo-data.js"></script>
+</head>
+
+<body>
+  <!-- 3D Particle Stage -->
+  <div class="stage" id="stage">
+    <canvas id="stage-canvas" role="button" tabindex="0" aria-label="Click or drag to morph particles into a 3D globe"></canvas>
+  </div>
+
+  <script>
+    // Polyfill THREE.BufferGeometry for all Three.js builds
+    if (typeof THREE !== 'undefined' && THREE.BufferGeometry) {
+      if (!THREE.BufferGeometry.prototype.setAttribute) {
+        THREE.BufferGeometry.prototype.setAttribute = function (name, attribute) {
+          if (this.addAttribute) {
+            return this.addAttribute(name, attribute);
+          }
+          this.attributes[name] = attribute;
+          return this;
+        };
+      }
+      if (!THREE.BufferGeometry.prototype.getAttribute) {
+        THREE.BufferGeometry.prototype.getAttribute = function (name) {
+          return this.attributes ? this.attributes[name] : undefined;
+        };
+      }
+    }
+
+    (function () {
+      // Audio Synthesizer for smooth high-tech morph sounds
+      class MorphAudio {
+        constructor() {
+          this.ctx = null;
+        }
+        init() {
+          if (!this.ctx) {
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            if (AudioContext) {
+              this.ctx = new AudioContext();
+            }
+          }
+        }
+        play(direction = 1) {
+          try {
+            this.init();
+            if (!this.ctx) return;
+            if (this.ctx.state === 'suspended') this.ctx.resume();
+            const osc = this.ctx.createOscillator();
+            const gain = this.ctx.createGain();
+            osc.type = 'sine';
+            const now = this.ctx.currentTime;
+            if (direction === 1) {
+              osc.frequency.setValueAtTime(220, now);
+              osc.frequency.exponentialRampToValueAtTime(580, now + 0.35);
+            } else {
+              osc.frequency.setValueAtTime(580, now);
+              osc.frequency.exponentialRampToValueAtTime(220, now + 0.35);
+            }
+            gain.gain.setValueAtTime(0.025, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+            osc.connect(gain);
+            gain.connect(this.ctx.destination);
+            osc.start(now);
+            osc.stop(now + 0.35);
+          } catch (e) {}
+        }
+      }
+      const soundFX = new MorphAudio();
+
+      const COLUMNS = 120;
+      const stage = document.getElementById("stage");
+      const canvas = document.getElementById("stage-canvas");
+
+      // Morph State & Spring Physics
+      let morphValue = 0;
+      let targetMorphValue = 0;
+      let morphVelocity = 0;
+      const springStiffness = 160;
+      const springDamping = 16;
+
+      // Parallax & 3D Interactive Rotation
+      let isDragging = false;
+      let dragStartX = 0, dragStartY = 0;
+      let dragRotX = 0, dragRotY = 0;
+      let targetRotX = 0, targetRotY = 0;
+      let curRotX = 0, curRotY = 0;
+      let mouseX = 0, mouseY = 0;
+      let autoSpin = 0;
+      let hasDraggedSignificantly = false;
+
+      let renderer, scene, camera, particles;
+
+      // High quality Vector Canvas Badge Generator Fallback
+      function createVectorBadge() {
+        const w = 800, h = 190;
+        const cvs = document.createElement("canvas");
+        cvs.width = w; cvs.height = h;
+        const ctx = cvs.getContext("2d", { willReadFrequently: true });
+
+        // Pill shape background
+        const radius = 38;
+        ctx.fillStyle = "#032c32";
+        ctx.strokeStyle = "#19daa3";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        if (ctx.roundRect) {
+          ctx.roundRect(4, 4, w - 8, h - 8, radius);
+        } else {
+          ctx.rect(4, 4, w - 8, h - 8);
+        }
+        ctx.fill();
+        ctx.stroke();
+
+        // Main Title
+        ctx.fillStyle = "#19daa3";
+        ctx.font = "900 82px system-ui, -apple-system, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("SARVIQ", w / 2, 75);
+
+        // Subtitle
+        ctx.fillStyle = "#00ffb7";
+        ctx.font = "700 18px system-ui, -apple-system, sans-serif";
+        ctx.letterSpacing = "6px";
+        ctx.fillText("DIGITAL MARKETING & WEB SOLUTIONS", w / 2, 138);
+
+        return {
+          width: w,
+          height: h,
+          pixels: ctx.getImageData(0, 0, w, h).data
+        };
+      }
+
+      // Safe image loader
+      function loadBadgeData() {
+        return new Promise((resolve) => {
+          const src = (window.SARVIQ_BADGE_SRC && window.SARVIQ_BADGE_SRC.length > 50) 
+            ? window.SARVIQ_BADGE_SRC 
+            : ((window.CONTACT_LOGO_SRC && window.CONTACT_LOGO_SRC.length > 50) ? window.CONTACT_LOGO_SRC : "sarviq_logo_badge.png");
+
+          const img = new Image();
+          if (src.indexOf("http") === 0) img.crossOrigin = "anonymous";
+
+          let resolved = false;
+
+          const extractPixels = () => {
+            if (resolved) return;
+            const w = img.naturalWidth || img.width || 800;
+            const h = img.naturalHeight || img.height || 190;
+            if (w < 10 || h < 10) {
+              setTimeout(extractPixels, 25);
+              return;
+            }
+            resolved = true;
+
+            try {
+              const cvs = document.createElement("canvas");
+              cvs.width = w;
+              cvs.height = h;
+              const ctx = cvs.getContext("2d", { willReadFrequently: true });
+              ctx.drawImage(img, 0, 0, w, h);
+
+              const pixels = ctx.getImageData(0, 0, w, h).data;
+              resolve({
+                width: w,
+                height: h,
+                pixels: pixels
+              });
+            } catch (err) {
+              console.warn("Canvas pixel extraction fallback:", err);
+              resolve(createVectorBadge());
+            }
+          };
+
+          img.onload = () => {
+            if (img.decode) {
+              img.decode().then(extractPixels).catch(extractPixels);
+            } else {
+              extractPixels();
+            }
+          };
+
+          img.onerror = () => {
+            console.warn("Image load failed, using vector badge fallback");
+            resolve(createVectorBadge());
+          };
+
+          img.src = src;
+          if (img.complete && img.naturalWidth > 0) {
+            extractPixels();
+          }
+
+          setTimeout(() => {
+            if (!resolved) {
+              resolve(createVectorBadge());
+            }
+          }, 500);
+        });
+      }
+
+      function createParticles(photo) {
+        const imageAspect = photo.width / photo.height;
+        const rows = Math.round(COLUMNS / imageAspect);
+        const count = COLUMNS * rows;
+
+        const imagePositions = new Float32Array(count * 3);
+        const globePositions = new Float32Array(count * 3);
+        const colours = new Float32Array(count * 3);
+        const alphas = new Float32Array(count);
+        const globeAlphas = new Float32Array(count);
+        const sizes = new Float32Array(count);
+        const phases = new Float32Array(count);
+        const speeds = new Float32Array(count);
+        const color = new THREE.Color();
+
+        const defaultHalfW = 1.45;
+        const defaultHalfH = defaultHalfW / imageAspect;
+        const globeRadius = 0.78;
+        const ringRadius = globeRadius * 1.25;
+
+        for (let i = 0; i < count; i++) {
+          const col = i % COLUMNS;
+          const row = Math.floor(i / COLUMNS);
+          const sx = Math.min(photo.width - 1, Math.floor(((col + 0.5) / COLUMNS) * photo.width));
+          const sy = Math.min(photo.height - 1, Math.floor(((row + 0.5) / rows) * photo.height));
+          const px = (sy * photo.width + sx) * 4;
+          const offset = i * 3;
+
+          const r = photo.pixels[px] / 255;
+          const g = photo.pixels[px + 1] / 255;
+          const b = photo.pixels[px + 2] / 255;
+          const a = (photo.pixels[px + 3] !== undefined) ? photo.pixels[px + 3] / 255 : 1.0;
+
+          // Check if this pixel is bright text/logo vs dark background pill vs empty
+          const isBrightLogo = (a > 0.15) && (g > 0.35 || (r + g + b) > 0.40);
+          const isPillBg = (a > 0.15) && !isBrightLogo;
+
+          if (isBrightLogo) {
+            // Bright luminous neon cyan/emerald text & logo with high-tech sparkle
+            if (g > 0.85 && (r + b) > 0.3) {
+              color.setRGB(0.70, 1.0, 0.95); // White-cyan spark highlights
+              sizes[i] = 1.80;
+            } else {
+              color.setRGB(0.10, 0.98, 0.74); // Vibrant neon #19daa3
+              sizes[i] = 1.55;
+            }
+            alphas[i] = 1.0;
+            globeAlphas[i] = 0.98;
+          } else if (isPillBg) {
+            // Subtle cyber teal matrix dots for the badge pill contour
+            color.setRGB(0.04, 0.68, 0.60); // Deep luminous teal
+            alphas[i] = 0.26; // Subtle in 2D mode, crisp matrix dots!
+            globeAlphas[i] = 0.84;
+            sizes[i] = 1.20;
+          } else {
+            // Ambient space stardust
+            color.setRGB(0.08, 0.88, 0.70);
+            alphas[i] = 0.05;
+            globeAlphas[i] = 0.68;
+            sizes[i] = 0.95;
+          }
+
+          colours[offset] = color.r;
+          colours[offset + 1] = color.g;
+          colours[offset + 2] = color.b;
+
+          phases[i] = Math.random() * Math.PI * 2;
+          speeds[i] = 0.8 + Math.random() * 0.4;
+
+          // 2D Image Coordinates
+          const x = (col + 0.5) / COLUMNS;
+          const y = (row + 0.5) / rows;
+          imagePositions[offset] = (x - 0.5) * defaultHalfW * 2;
+          imagePositions[offset + 1] = (0.5 - y) * defaultHalfH * 2;
+          imagePositions[offset + 2] = 0;
+
+          // 3D Holographic Globe Coordinates (Fibonacci Sphere + Accent Rings)
+          if (i % 10 === 0) {
+            // Planetary Equatorial / Orbital Ring
+            const ringAngle = (i / count) * Math.PI * 8;
+            const rOffset = (Math.random() - 0.5) * 0.06;
+            const rx = Math.cos(ringAngle) * (ringRadius + rOffset);
+            const rz = Math.sin(ringAngle) * (ringRadius + rOffset);
+            const ry = (Math.random() - 0.5) * 0.04;
+            
+            // Tilt the orbital ring 28 degrees
+            const tilt = 0.45;
+            globePositions[offset] = rx;
+            globePositions[offset + 1] = ry * Math.cos(tilt) - rz * Math.sin(tilt);
+            globePositions[offset + 2] = ry * Math.sin(tilt) + rz * Math.cos(tilt);
+
+            // Ring particles have glowing cyan tint
+            colours[offset] = 0.20;
+            colours[offset + 1] = 0.98;
+            colours[offset + 2] = 1.0;
+            globeAlphas[i] = 0.90;
+            sizes[i] = 1.35;
+          } else {
+            // Fibonacci Sphere mapping with spherical coordinate distribution
+            const sphereY = 1 - (i / Math.max(count - 1, 1)) * 2;
+            const rDist = Math.sqrt(Math.max(0, 1 - sphereY * sphereY));
+            const phi = i * 2.39996323; // Golden angle
+            const sphereX = Math.cos(phi) * rDist;
+            const sphereZ = Math.sin(phi) * rDist;
+
+            globePositions[offset] = sphereX * globeRadius;
+            globePositions[offset + 1] = sphereY * globeRadius;
+            globePositions[offset + 2] = sphereZ * globeRadius;
+          }
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.BufferAttribute(imagePositions, 3));
+        geometry.setAttribute("aGlobePos", new THREE.BufferAttribute(globePositions, 3));
+        geometry.setAttribute("aColor", new THREE.BufferAttribute(colours, 3));
+        geometry.setAttribute("aAlpha", new THREE.BufferAttribute(alphas, 1));
+        geometry.setAttribute("aGlobeAlpha", new THREE.BufferAttribute(globeAlphas, 1));
+        geometry.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
+        geometry.setAttribute("aPhase", new THREE.BufferAttribute(phases, 1));
+        geometry.setAttribute("aSpeed", new THREE.BufferAttribute(speeds, 1));
+        geometry.computeBoundingSphere();
+
+        const vertexShader = `
+          uniform float uMorph;
+          uniform float uTime;
+          uniform float uPointSize;
+          uniform float uGlobeScale;
+          uniform float uRotX;
+          uniform float uRotY;
+          uniform float uGlobeSpin;
+          uniform float uIsMobile;
+          uniform vec2 uMouse;
+
+          attribute vec3 aGlobePos;
+          attribute vec3 aColor;
+          attribute float aAlpha;
+          attribute float aGlobeAlpha;
+          attribute float aSize;
+          attribute float aPhase;
+          attribute float aSpeed;
+
+          varying vec3 vColor;
+          varying float vAlpha;
+          varying float vDepth;
+
+          void main() {
+            vColor = aColor;
+
+            // Total globe Y rotation (auto-spin + drag rotation)
+            float totalSpin = uGlobeSpin + uRotY;
+            float cosY = cos(totalSpin);
+            float sinY = sin(totalSpin);
+
+            // Responsive Globe Scaling for Mobile screens
+            vec3 scaledGlobe = aGlobePos * uGlobeScale;
+
+            // Rotate sphere around Y axis
+            vec3 rotatedGlobe = vec3(
+              scaledGlobe.x * cosY + scaledGlobe.z * sinY,
+              scaledGlobe.y,
+              -scaledGlobe.x * sinY + scaledGlobe.z * cosY
+            );
+
+            // Rotate sphere around X axis (tilt & drag)
+            float cosX = cos(uRotX - 0.22);
+            float sinX = sin(uRotX - 0.22);
+            rotatedGlobe = vec3(
+              rotatedGlobe.x,
+              rotatedGlobe.y * cosX - rotatedGlobe.z * sinX,
+              rotatedGlobe.y * sinX + rotatedGlobe.z * cosX
+            );
+
+            // Gentle harmonic floating wave
+            vec3 turb = vec3(
+              sin(uTime * (aSpeed * 1.4 + 0.6) + aPhase) * 0.012,
+              cos(uTime * (aSpeed * 1.1 + 0.4) + aPhase * 1.5) * 0.012,
+              sin(uTime * (aSpeed * 0.9 + 0.2) + aPhase * 2.1) * 0.012
+            );
+
+            vec3 targetGlobe = rotatedGlobe + turb * uMorph;
+
+            // Swirl vortex motion during morphing
+            float morphCurve = smoothstep(0.0, 1.0, uMorph);
+            float swirl = (1.0 - morphCurve) * morphCurve * 3.14159 * 0.75;
+            float sc = cos(swirl);
+            float ss = sin(swirl);
+
+            vec3 mixedPos = mix(position, targetGlobe, morphCurve);
+            mixedPos.xy = vec2(
+              mixedPos.x * sc - mixedPos.y * ss,
+              mixedPos.x * ss + mixedPos.y * sc
+            );
+
+            // 2D Mouse / Touch Ripple Effect
+            if (uMorph < 0.5) {
+              float mouseDist = length(mixedPos.xy - uMouse);
+              float ripple = smoothstep(0.45, 0.0, mouseDist) * (1.0 - uMorph * 2.0);
+              mixedPos.z += sin(mouseDist * 16.0 - uTime * 4.0) * 0.03 * ripple;
+            }
+
+            vec4 mvPosition = modelViewMatrix * vec4(mixedPos, 1.0);
+            gl_Position = projectionMatrix * mvPosition;
+
+            // 3D Depth calculation for holographic see-through sphere
+            // mvPosition.z goes from roughly -0.85 (back) to +0.85 (front)
+            float depth01 = clamp((mvPosition.z + 0.85) / 1.70, 0.0, 1.0);
+            vDepth = depth01;
+
+            // Dynamic Point Size Scaling (Medium Balanced Size):
+            float minScale = mix(0.70, 0.55, uIsMobile);
+            float maxAdd = mix(0.50, 0.40, uIsMobile);
+            float depthSizeScale = mix(1.0, minScale + depth01 * maxAdd, morphCurve);
+            gl_PointSize = uPointSize * aSize * depthSizeScale;
+
+            // Holographic Depth Alpha:
+            float baseAlpha = mix(0.35, 0.22, uIsMobile);
+            float maxAlpha = mix(1.0, 0.90, uIsMobile);
+            float globeDepthAlpha = aGlobeAlpha * (baseAlpha + depth01 * (maxAlpha - baseAlpha));
+            
+            // Atmospheric rim lighting
+            float rim = (1.0 - abs(depth01 - 0.5) * 2.0) * mix(0.22, 0.16, uIsMobile);
+            globeDepthAlpha = clamp(globeDepthAlpha + rim, 0.0, 1.0);
+
+            vAlpha = mix(aAlpha, globeDepthAlpha, morphCurve);
+          }
+        `;
+
+        const fragmentShader = `
+          varying vec3 vColor;
+          varying float vAlpha;
+          varying float vDepth;
+
+          void main() {
+            vec2 coord = gl_PointCoord - vec2(0.5);
+            float dist = length(coord);
+            if (dist > 0.5) discard;
+
+            // Medium balanced cyber glowing particle:
+            float outerGlow = smoothstep(0.50, 0.12, dist);
+            float core = smoothstep(0.28, 0.0, dist);
+            float centerSpark = smoothstep(0.14, 0.0, dist);
+
+            float alpha = (outerGlow * 0.60 + core * 0.55 + centerSpark * 0.45) * vAlpha;
+            if (alpha < 0.01) discard;
+
+            // Center spark adds crisp starlight luminosity
+            vec3 sparkColor = vec3(0.35, 0.55, 0.50) * centerSpark;
+            vec3 finalColor = vColor + sparkColor;
+
+            gl_FragColor = vec4(finalColor, min(alpha, 1.0));
+          }
+        `;
+
+        const material = new THREE.ShaderMaterial({
+          vertexShader,
+          fragmentShader,
+          uniforms: {
+            uMorph: { value: 0 },
+            uTime: { value: 0 },
+            uPointSize: { value: 5.0 },
+            uGlobeScale: { value: 1.0 },
+            uRotX: { value: 0 },
+            uRotY: { value: 0 },
+            uGlobeSpin: { value: 0 },
+            uIsMobile: { value: 0.0 },
+            uMouse: { value: new THREE.Vector2(999, 999) }
+          },
+          transparent: true,
+          blending: THREE.AdditiveBlending, // Radiant holographic glow
+          depthWrite: false,
+          depthTest: false
+        });
+
+        const points = new THREE.Points(geometry, material);
+        points.frustumCulled = false;
+
+        return {
+          imageAspect,
+          columns: COLUMNS,
+          rows,
+          material,
+          object: points
+        };
+      }
+
+      function layoutParticles(particlesObj, aspect) {
+        const { columns, imageAspect, object, rows } = particlesObj;
+        
+        let imageHalfWidth, imageHalfHeight;
+        if (aspect > imageAspect) {
+          imageHalfHeight = 0.38;
+          imageHalfWidth = imageHalfHeight * imageAspect;
+        } else {
+          // On mobile portrait, span 88% of available viewport width
+          imageHalfWidth = aspect * 0.88;
+          imageHalfHeight = imageHalfWidth / imageAspect;
+          if (imageHalfHeight > 0.72) {
+            imageHalfHeight = 0.72;
+            imageHalfWidth = imageHalfHeight * imageAspect;
+          }
+        }
+
+        const position = object.geometry.getAttribute("position");
+
+        for (let i = 0; i < position.count; i++) {
+          const col = i % columns;
+          const row = Math.floor(i / columns);
+          const x = (col + 0.5) / columns;
+          const y = (row + 0.5) / rows;
+
+          position.setXYZ(
+            i,
+            (x - 0.5) * imageHalfWidth * 2,
+            (0.5 - y) * imageHalfHeight * 2,
+            0
+          );
+        }
+
+        position.needsUpdate = true;
+        object.geometry.computeBoundingSphere();
+
+        // Responsive Globe Scaling so 3D sphere is never clipped on mobile screens
+        const maxGlobeRadius = 0.78;
+        const globeScale = (aspect < 1.0) ? Math.min(1.0, (aspect * 0.82) / maxGlobeRadius) : 1.0;
+        particlesObj.material.uniforms.uGlobeScale.value = globeScale;
+
+        // Detect mobile screen for fine-tuned medium pixel calibration
+        const stageW = stage.clientWidth || window.innerWidth || 380;
+        const stageH = stage.clientHeight || window.innerHeight || 400;
+        const isMobile = (aspect < 1.0) || (stageW < 600);
+        particlesObj.material.uniforms.uIsMobile.value = isMobile ? 1.0 : 0.0;
+
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+        let basePointSize;
+        if (isMobile) {
+          // Mobile: exact point size 3.0px – 4.0px (DPR ke saath 5.0px – 7.0px)
+          basePointSize = Math.max(3.0, Math.min((stageW / columns) * 1.55, 4.0));
+          particlesObj.material.uniforms.uPointSize.value = Math.max(5.0, Math.min(basePointSize * dpr, 7.0));
+        } else {
+          // Desktop / Tablet Landscape: large, prominent, glowing particles
+          basePointSize = Math.max(4.5, Math.min((stageH / rows) * 0.85, 6.2));
+          particlesObj.material.uniforms.uPointSize.value = basePointSize * dpr;
+        }
+      }
+
+      async function init() {
+        try {
+          renderer = new THREE.WebGLRenderer({
+            canvas,
+            antialias: true,
+            alpha: true,
+            powerPreference: "high-performance"
+          });
+          renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+          renderer.setSize(stage.clientWidth || window.innerWidth, stage.clientHeight || window.innerHeight, true);
+          renderer.setClearColor(0x000000, 0);
+
+          scene = new THREE.Scene();
+          camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -10, 10);
+          camera.position.set(0, 0, 4);
+
+          const photo = await loadBadgeData();
+          particles = createParticles(photo);
+          scene.add(particles.object);
+
+          const resize = () => {
+            const w = stage.clientWidth || window.innerWidth || 800;
+            const h = stage.clientHeight || window.innerHeight || 600;
+            const aspect = w / h;
+
+            renderer.setSize(w, h, true);
+            camera.left = -aspect;
+            camera.right = aspect;
+            camera.top = 1;
+            camera.bottom = -1;
+            camera.updateProjectionMatrix();
+            layoutParticles(particles, aspect);
+          };
+
+          if (window.ResizeObserver) {
+            new ResizeObserver(resize).observe(stage);
+          }
+          window.addEventListener("resize", resize);
+          resize();
+
+          setupEvents();
+          setupLoop();
+        } catch(err) {
+          console.error("Particle morph init error:", err);
+        }
+      }
+
+      function setupEvents() {
+        let pointerDownTime = 0;
+
+        const toggleMorph = () => {
+          if (targetMorphValue === 0) {
+            targetMorphValue = 1.0;
+            soundFX.play(1);
+          } else {
+            targetMorphValue = 0.0;
+            soundFX.play(-1);
+          }
+        };
+
+        stage.addEventListener("pointerdown", (e) => {
+          isDragging = true;
+          hasDraggedSignificantly = false;
+          dragStartX = e.clientX;
+          dragStartY = e.clientY;
+          pointerDownTime = performance.now();
+        });
+
+        window.addEventListener("pointermove", (e) => {
+          const rect = stage.getBoundingClientRect();
+          mouseX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+          mouseY = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
+
+          if (particles && particles.material) {
+            particles.material.uniforms.uMouse.value.set(mouseX * camera.right, mouseY);
+          }
+
+          if (isDragging) {
+            const dx = e.clientX - dragStartX;
+            const dy = e.clientY - dragStartY;
+
+            if (Math.hypot(dx, dy) > 6) {
+              hasDraggedSignificantly = true;
+            }
+
+            // Interactive 3D Orbit Drag Rotation
+            dragRotY += dx * 0.009;
+            dragRotX += dy * 0.009;
+
+            // Clamp vertical rotation so globe doesn't flip upside down
+            dragRotX = Math.max(-1.4, Math.min(1.4, dragRotX));
+
+            dragStartX = e.clientX;
+            dragStartY = e.clientY;
+          }
+        });
+
+        window.addEventListener("pointerup", (e) => {
+          if (isDragging) {
+            isDragging = false;
+            const clickDuration = performance.now() - pointerDownTime;
+            // If it was a quick click without large drag, toggle morph
+            if (!hasDraggedSignificantly && clickDuration < 350) {
+              toggleMorph();
+            }
+          }
+        });
+
+        window.addEventListener("pointercancel", () => {
+          isDragging = false;
+        });
+      }
+
+      let lastTime = performance.now();
+
+      function setupLoop() {
+        function render(now) {
+          requestAnimationFrame(render);
+          const delta = Math.min((now - lastTime) / 1000, 0.1);
+          lastTime = now;
+
+          // Spring physics for smooth organic morphing
+          const springForce = (targetMorphValue - morphValue) * springStiffness;
+          const dampingForce = -morphVelocity * springDamping;
+          morphVelocity += (springForce + dampingForce) * delta;
+          morphValue += morphVelocity * delta;
+
+          if (Math.abs(targetMorphValue - morphValue) < 0.0003 && Math.abs(morphVelocity) < 0.0003) {
+            morphValue = targetMorphValue;
+            morphVelocity = 0;
+          }
+
+          // Smooth ambient globe spin
+          autoSpin += delta * 0.38 * morphValue;
+
+          // Smooth damping for drag rotation & parallax
+          curRotX += (dragRotX - curRotX) * 0.12;
+          curRotY += (dragRotY - curRotY) * 0.12;
+
+          if (particles) {
+            particles.material.uniforms.uMorph.value = morphValue;
+            particles.material.uniforms.uTime.value = now * 0.001;
+            particles.material.uniforms.uRotX.value = curRotX * morphValue;
+            particles.material.uniforms.uRotY.value = curRotY * morphValue;
+            particles.material.uniforms.uGlobeSpin.value = autoSpin;
+
+            // Subtle mouse parallax tilt
+            const parallaxX = -mouseY * 0.15;
+            const parallaxY = mouseX * 0.20;
+            particles.object.rotation.x = parallaxX * (1.0 - morphValue * 0.7);
+            particles.object.rotation.y = parallaxY * (1.0 - morphValue * 0.7);
+          }
+
+          if (renderer && scene && camera) {
+            renderer.render(scene, camera);
+          }
+        }
+        requestAnimationFrame(render);
+      }
+
+      init();
+    })();
+  </script>
+</body>
+
+</html>
